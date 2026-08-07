@@ -1,26 +1,17 @@
 from langgraph.graph import StateGraph, END
-from typing import TypedDict, List
 from langchain_ollama import ChatOllama
+from state import AgentState, initial_state, summarize_state
 
 llm = ChatOllama(model="llama3.1:8b")
 
-# All modules the agent knows about, run once each unless chained back in
 CORE_MODULES = ["fingerprint", "auth_check", "sqli_check", "xss_check"]
-MAX_STEPS = 15  # safety net so a bug can't loop forever
+MAX_STEPS = 15
 
-class AgentState(TypedDict):
-    findings: List[dict]
-    modules_run: List[str]
-    pending_chains: List[dict]
-    _next_action: str
-    decision_log: List[str]
-    done: bool
-
-# --- Stub modules (fake data — Person B will replace these with real logic) ---
+# --- Stub modules (Person B will replace these with real logic) ---
 def run_fingerprint():
     return {
         "finding_type": "tech_stack_identified",
-        "data": {"stack": "Node.js + Express"},
+        "data": {"stack": "Node.js", "version": "18.2"},
         "chain_trigger": False,
         "chain_data": None
     }
@@ -44,7 +35,7 @@ def run_idor_check(token):
 
 def run_sqli_check():
     return {
-        "finding_type": "sqli_not_found",
+        "finding_type": "no_vulnerability",
         "data": {},
         "chain_trigger": False,
         "chain_data": None
@@ -66,11 +57,10 @@ MODULE_RUNNERS = {
     "idor_check": lambda state: run_idor_check(state["pending_chains"][0]["token"]),
 }
 
-# --- decide_node: outputs #1, #2, #3, #4 ---
+# --- decide_node ---
 def decide_node(state: AgentState):
     step_num = len(state["decision_log"]) + 1
 
-    # Safety cap
     if step_num > MAX_STEPS:
         reason = "hit max step limit — stopping to avoid infinite loop"
         state["decision_log"].append(f"Step {step_num}: {reason}")
@@ -79,9 +69,8 @@ def decide_node(state: AgentState):
         print(f"  [Step {step_num}] {reason}")
         return state
 
-    # --- Output #3: chain-trigger OVERRIDES normal reasoning ---
     if state["pending_chains"]:
-        chain = state["pending_chains"][0]  # oldest pending chain, FIFO
+        chain = state["pending_chains"][0]
         action = chain["suggested_module"]
         reason = f"CHAINED into '{action}' because: previous finding provided data ({chain})"
         state["decision_log"].append(f"Step {step_num}: {reason}")
@@ -89,7 +78,6 @@ def decide_node(state: AgentState):
         print(f"  [Step {step_num}] {reason}")
         return state
 
-    # --- Normal reasoning: any core modules left to run? ---
     remaining = [m for m in CORE_MODULES if m not in state["modules_run"]]
 
     if not remaining:
@@ -100,16 +88,16 @@ def decide_node(state: AgentState):
         print(f"  [Step {step_num}] {reason}")
         return state
 
-    # Ask the LLM to pick from what's left
-    prompt = f"""Answer with exactly one word, nothing else.
+    prompt = f"""Current assessment status:
+{summarize_state(state)}
+
 Modules not yet run: {remaining}
-Pick the most sensible one to run next.
-One word answer:"""
+Answer with exactly one word — pick the most sensible one to run next."""
 
     response = llm.invoke(prompt)
     raw = response.content.strip().lower()
 
-    action = next((m for m in remaining if m in raw), remaining[0])  # fallback: first remaining
+    action = next((m for m in remaining if m in raw), remaining[0])
     reason = f"chose '{action}' — next unrun module in the assessment"
 
     state["decision_log"].append(f"Step {step_num}: {reason}")
@@ -117,16 +105,23 @@ One word answer:"""
     print(f"  [Step {step_num}] {reason}")
     return state
 
-# --- execute_node: output #1 consumed, findings/modules_run updated ---
+# --- execute_node ---
 def execute_node(state: AgentState):
     action = state["_next_action"]
-    result = MODULE_RUNNERS[action](state)
+    try:
+        result = MODULE_RUNNERS[action](state)
+    except Exception as e:
+        print(f"  [ERROR] {action} failed: {e}")
+        result = {"finding_type": "error", "data": {"error": str(e)}, "chain_trigger": False, "chain_data": None}
 
     state["findings"].append(result)
     state["modules_run"].append(action)
 
-    if action == "idor_check":
-        state["pending_chains"].pop(0)  # this chain has now been consumed
+    if action == "fingerprint" and "stack" in result.get("data", {}):
+        state["tech_stack"] = result["data"]
+
+    if action == "idor_check" and state["pending_chains"]:
+        state["pending_chains"].pop(0)
 
     if result["chain_trigger"]:
         state["pending_chains"].append(result["chain_data"])
@@ -145,11 +140,8 @@ graph.add_edge("execute", "decide")
 app = graph.compile()
 
 if __name__ == "__main__":
-    initial_state = {
-        "findings": [], "modules_run": [], "pending_chains": [],
-        "_next_action": "", "decision_log": [], "done": False
-    }
-    final_state = app.invoke(initial_state)
+    state = initial_state("http://localhost:3000")
+    final_state = app.invoke(state)
 
     print("\n--- DECISION LOG (Module 1's full output) ---")
     for line in final_state["decision_log"]:
@@ -157,3 +149,4 @@ if __name__ == "__main__":
 
     print("\nFINAL modules run:", final_state["modules_run"])
     print("FINAL findings count:", len(final_state["findings"]))
+    print("FINAL tech stack:", final_state["tech_stack"])
