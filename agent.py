@@ -30,7 +30,7 @@ def decide_node(state: AgentState):
         print(f"  [Step {step_num}] {reason}")
         return state
 
-    if state["pending_chains"]:
+    if state["pending_chains"] and state["chaining_enabled"]:
         chain = state["pending_chains"][0]
         action = chain["next_module"]   # matches his key name, not "suggested_module"
         reason = f"CHAINED into '{action}' because: {chain.get('reason', 'follow-up triggered')}"

@@ -7,13 +7,14 @@ class AgentState(TypedDict):
     findings: List[dict]
     modules_run: List[str]
     pending_chains: List[dict]
-    pending_chain: Optional[dict]   # NEW — singular, for his idor_check's expected format
+    pending_chain: Optional[dict]
     _next_action: str
     decision_log: List[str]
     done: bool
-    step_count: int                 # NEW
+    step_count: int
+    chaining_enabled: bool          # NEW
 
-def initial_state(target_url: str) -> AgentState:
+def initial_state(target_url: str, chaining_enabled: bool = True) -> AgentState:
     return {
         "target_url": target_url,
         "tech_stack": {},
@@ -26,6 +27,7 @@ def initial_state(target_url: str) -> AgentState:
         "decision_log": [],
         "done": False,
         "step_count": 0,
+        "chaining_enabled": chaining_enabled,   # NEW
     }
 
 def summarize_state(state: AgentState) -> str:
