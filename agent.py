@@ -2,62 +2,23 @@ from langgraph.graph import StateGraph, END
 from langchain_ollama import ChatOllama
 from state import AgentState, initial_state, summarize_state
 
+from modules.recon import run_fingerprint, run_crawl
+from modules.vuln_assess import run_auth_check, run_idor_check, run_sqli_check, run_xss_check
+
 llm = ChatOllama(model="llama3.1:8b")
 
-CORE_MODULES = ["fingerprint", "auth_check", "sqli_check", "xss_check"]
+CORE_MODULES = ["fingerprint", "crawl", "auth_check", "sqli_check", "xss_check"]
 MAX_STEPS = 15
 
-# --- Stub modules (Person B will replace these with real logic) ---
-def run_fingerprint():
-    return {
-        "finding_type": "tech_stack_identified",
-        "data": {"stack": "Node.js", "version": "18.2"},
-        "chain_trigger": False,
-        "chain_data": None
-    }
-
-def run_auth_check():
-    return {
-        "finding_type": "auth_token_found",
-        "data": {"token": "abc123", "user": "lowpriv_user"},
-        "chain_trigger": True,
-        "chain_data": {"suggested_module": "idor_check", "token": "abc123"}
-    }
-
-def run_idor_check(token):
-    print(f"  -> running IDOR check using token: {token}")
-    return {
-        "finding_type": "idor_confirmed",
-        "data": {"leaked_user": "other_user"},
-        "chain_trigger": False,
-        "chain_data": None
-    }
-
-def run_sqli_check():
-    return {
-        "finding_type": "no_vulnerability",
-        "data": {},
-        "chain_trigger": False,
-        "chain_data": None
-    }
-
-def run_xss_check():
-    return {
-        "finding_type": "xss_found",
-        "data": {"field": "search_box"},
-        "chain_trigger": False,
-        "chain_data": None
-    }
-
 MODULE_RUNNERS = {
-    "fingerprint": lambda state: run_fingerprint(),
-    "auth_check": lambda state: run_auth_check(),
-    "sqli_check": lambda state: run_sqli_check(),
-    "xss_check": lambda state: run_xss_check(),
-    "idor_check": lambda state: run_idor_check(state["pending_chains"][0]["token"]),
+    "fingerprint": lambda state: run_fingerprint(state),
+    "crawl": lambda state: run_crawl(state),
+    "auth_check": lambda state: run_auth_check(state),
+    "sqli_check": lambda state: run_sqli_check(state),
+    "xss_check": lambda state: run_xss_check(state),
+    "idor_check": lambda state: run_idor_check(state),  # reads state["pending_chain"] internally
 }
 
-# --- decide_node ---
 def decide_node(state: AgentState):
     step_num = len(state["decision_log"]) + 1
 
@@ -71,8 +32,8 @@ def decide_node(state: AgentState):
 
     if state["pending_chains"]:
         chain = state["pending_chains"][0]
-        action = chain["suggested_module"]
-        reason = f"CHAINED into '{action}' because: previous finding provided data ({chain})"
+        action = chain["next_module"]   # matches his key name, not "suggested_module"
+        reason = f"CHAINED into '{action}' because: {chain.get('reason', 'follow-up triggered')}"
         state["decision_log"].append(f"Step {step_num}: {reason}")
         state["_next_action"] = action
         print(f"  [Step {step_num}] {reason}")
@@ -96,7 +57,6 @@ Answer with exactly one word — pick the most sensible one to run next."""
 
     response = llm.invoke(prompt)
     raw = response.content.strip().lower()
-
     action = next((m for m in remaining if m in raw), remaining[0])
     reason = f"chose '{action}' — next unrun module in the assessment"
 
@@ -105,9 +65,13 @@ Answer with exactly one word — pick the most sensible one to run next."""
     print(f"  [Step {step_num}] {reason}")
     return state
 
-# --- execute_node ---
 def execute_node(state: AgentState):
     action = state["_next_action"]
+
+    # bridge: his idor_check expects state["pending_chain"] (singular)
+    if action == "idor_check" and state["pending_chains"]:
+        state["pending_chain"] = state["pending_chains"][0]
+
     try:
         result = MODULE_RUNNERS[action](state)
     except Exception as e:
@@ -116,12 +80,14 @@ def execute_node(state: AgentState):
 
     state["findings"].append(result)
     state["modules_run"].append(action)
+    state["step_count"] += 1
 
-    if action == "fingerprint" and "stack" in result.get("data", {}):
-        state["tech_stack"] = result["data"]
+    if action == "fingerprint" and "tech_stack" in result.get("data", {}):
+        state["tech_stack"] = result["data"]["tech_stack"]
 
     if action == "idor_check" and state["pending_chains"]:
         state["pending_chains"].pop(0)
+        state["pending_chain"] = None
 
     if result["chain_trigger"]:
         state["pending_chains"].append(result["chain_data"])
@@ -139,14 +105,3 @@ graph.add_conditional_edges("decide", route_after_decide, {"execute": "execute",
 graph.add_edge("execute", "decide")
 app = graph.compile()
 
-if __name__ == "__main__":
-    state = initial_state("http://localhost:3000")
-    final_state = app.invoke(state)
-
-    print("\n--- DECISION LOG (Module 1's full output) ---")
-    for line in final_state["decision_log"]:
-        print(line)
-
-    print("\nFINAL modules run:", final_state["modules_run"])
-    print("FINAL findings count:", len(final_state["findings"]))
-    print("FINAL tech stack:", final_state["tech_stack"])
