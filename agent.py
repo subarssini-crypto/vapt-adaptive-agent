@@ -4,6 +4,7 @@ from state import AgentState, initial_state, summarize_state
 
 from modules.recon import run_fingerprint, run_crawl
 from modules.vuln_assess import run_auth_check, run_idor_check, run_sqli_check, run_xss_check
+from modules.report import generate_report
 
 llm = ChatOllama(model="llama3.1:8b")
 
@@ -16,7 +17,7 @@ MODULE_RUNNERS = {
     "auth_check": lambda state: run_auth_check(state),
     "sqli_check": lambda state: run_sqli_check(state),
     "xss_check": lambda state: run_xss_check(state),
-    "idor_check": lambda state: run_idor_check(state),  # reads state["pending_chain"] internally
+    "idor_check": lambda state: run_idor_check(state),
 }
 
 def decide_node(state: AgentState):
@@ -32,7 +33,7 @@ def decide_node(state: AgentState):
 
     if state["pending_chains"] and state["chaining_enabled"]:
         chain = state["pending_chains"][0]
-        action = chain["next_module"]   # matches his key name, not "suggested_module"
+        action = chain["next_module"]
         reason = f"CHAINED into '{action}' because: {chain.get('reason', 'follow-up triggered')}"
         state["decision_log"].append(f"Step {step_num}: {reason}")
         state["_next_action"] = action
@@ -67,7 +68,6 @@ Answer with exactly one word — pick the most sensible one to run next."""
 def execute_node(state: AgentState):
     action = state["_next_action"]
 
-    # bridge: his idor_check expects state["pending_chain"] (singular)
     if action == "idor_check" and state["pending_chains"]:
         state["pending_chain"] = state["pending_chains"][0]
 
@@ -103,3 +103,13 @@ graph.set_entry_point("decide")
 graph.add_conditional_edges("decide", route_after_decide, {"execute": "execute", "end": END})
 graph.add_edge("execute", "decide")
 app = graph.compile()
+
+if __name__ == "__main__":
+    state = initial_state("http://localhost:3000")
+    final_state = app.invoke(state)
+
+    print("\n--- ALL FINDINGS ---")
+    for f in final_state["findings"]:
+        print(f"[{f['finding_type']}] {f['data']}")
+
+    print("\n" + generate_report(final_state))

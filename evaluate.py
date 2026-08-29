@@ -4,6 +4,7 @@ Module 6b: Evaluation — baseline (no chaining) vs. full agent (chaining enable
 
 from agent import app
 from state import initial_state
+from modules.report import generate_report
 
 TARGET = "http://localhost:3000"
 
@@ -18,7 +19,6 @@ def run_mode(chaining_enabled: bool):
     return final_state
 
 def summarize_run(label, final_state):
-    finding_types = [f["finding_type"] for f in final_state["findings"]]
     vulnerable_findings = [
         f for f in final_state["findings"]
         if isinstance(f["data"], dict) and f["data"].get("vulnerable") is True
@@ -39,6 +39,8 @@ if __name__ == "__main__":
 
     chained_result = run_mode(chaining_enabled=True)
     chained_summary = summarize_run("FULL AGENT (chaining enabled)", chained_result)
+
+    print("\n" + generate_report(chained_result))
 
     print(f"\n\n{'='*60}")
     print("COMPARISON: BASELINE vs. CHAINING-ENABLED AGENT")
